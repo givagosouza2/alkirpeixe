@@ -794,8 +794,8 @@ cols[3].metric(
 )
 
 st.caption(
-    'O intervalo entre transições é o tempo entre dois cruzamentos consecutivos de X = 0. '
-    'Os tempos de cruzamento são estimados por interpolação linear.'
+    'O intervalo entre transições é o tempo entre duas transições consecutivas entre claro e escuro. '
+    'Quando há polígonos em e.areaint, o cruzamento é estimado na fronteira real por interpolação linear.'
 )
 
 comp=pd.DataFrame([sall,sc,sd])
@@ -803,6 +803,42 @@ comp=comp[['regiao','tempo_total','distancia_total','velocidade_media','velocida
 comp.columns=['Região','Tempo total','Distância total','Velocidade média','DP velocidade','Tamanho médio vetor','DP tamanho vetor','Orientação média (°)','Semieixo maior','Semieixo menor','Índice direcionalidade','Orientação elipse (°)','N segmentos']
 st.subheader('Comparação entre regiões')
 st.dataframe(comp.round(4),use_container_width=True,hide_index=True)
+
+st.subheader('Índice de direcionalidade')
+
+cols = st.columns(3)
+cols[0].metric(
+    'Campo total',
+    fmt(sall['indice_direcionalidade'], 3)
+)
+cols[1].metric(
+    'Claro',
+    fmt(sc['indice_direcionalidade'], 3)
+)
+cols[2].metric(
+    'Escuro',
+    fmt(sd['indice_direcionalidade'], 3)
+)
+
+cols = st.columns(3)
+cols[0].metric(
+    'Semieixos — Campo total',
+    f"{fmt(sall['semieixo_maior'],3)} / {fmt(sall['semieixo_menor'],3)}"
+)
+cols[1].metric(
+    'Semieixos — Claro',
+    f"{fmt(sc['semieixo_maior'],3)} / {fmt(sc['semieixo_menor'],3)}"
+)
+cols[2].metric(
+    'Semieixos — Escuro',
+    f"{fmt(sd['semieixo_maior'],3)} / {fmt(sd['semieixo_menor'],3)}"
+)
+
+st.caption(
+    'Índice de direcionalidade = semieixo maior / semieixo menor. '
+    'Valores próximos de 1 indicam distribuição mais isotrópica; '
+    'valores maiores indicam maior anisotropia direcional.'
+)
 
 st.subheader('Velocidade nas transições')
 
