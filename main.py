@@ -253,16 +253,77 @@ for name,dsub in [('Claro',clear),('Escuro',dark)]:
 figv.update_layout(xaxis_title='Tempo (s)',yaxis_title='Velocidade',height=420)
 st.plotly_chart(figv,use_container_width=True)
 
-st.subheader('Distribuição dos ângulos')
-bw=st.select_slider('Largura dos setores',options=[5,10,15,20,30,45],value=15,format_func=lambda x:f'{x}°')
-bins=np.arange(0,360+bw,bw); centers=(bins[:-1]+bins[1:])/2
+st.subheader('Distribuição angular dos vetores — gráfico polar')
+bw=st.select_slider(
+    'Largura dos setores angulares',
+    options=[5,10,15,20,30,45],
+    value=15,
+    format_func=lambda x:f'{x}°'
+)
+polar_mode=st.radio(
+    'Representação radial',
+    options=['Número de vetores','Percentual de vetores'],
+    horizontal=True
+)
+
+bins=np.arange(0,360+bw,bw)
+centers=(bins[:-1]+bins[1:])/2
+
 figa=go.Figure()
+
 for name,dsub in [('Claro',clear),('Escuro',dark)]:
-    if not dsub.empty:
-        h,_=np.histogram(dsub['orientacao_graus'],bins=bins)
-        figa.add_trace(go.Bar(x=centers,y=h,name=name,opacity=.75))
-figa.update_layout(barmode='group',xaxis=dict(title='Orientação (°)',range=[0,360],tickmode='array',tickvals=np.arange(0,361,45)),yaxis_title='Número de vetores',height=420)
+    if dsub.empty:
+        continue
+
+    h,_=np.histogram(dsub['orientacao_graus'],bins=bins)
+
+    if polar_mode == 'Percentual de vetores':
+        total=h.sum()
+        radial=(100.0*h/total) if total>0 else h.astype(float)
+        hover='Orientação=%{theta:.1f}°<br>Percentual=%{r:.2f}%<extra>'+name+'</extra>'
+        radial_title='Percentual (%)'
+    else:
+        radial=h
+        hover='Orientação=%{theta:.1f}°<br>Vetores=%{r}<extra>'+name+'</extra>'
+        radial_title='Número de vetores'
+
+    figa.add_trace(
+        go.Barpolar(
+            r=radial,
+            theta=centers,
+            width=[bw*0.90]*len(centers),
+            name=name,
+            opacity=0.62,
+            hovertemplate=hover
+        )
+    )
+
+figa.update_layout(
+    height=620,
+    margin=dict(l=30,r=30,t=40,b=30),
+    polar=dict(
+        angularaxis=dict(
+            direction='counterclockwise',
+            rotation=0,
+            tickmode='array',
+            tickvals=[0,45,90,135,180,225,270,315],
+            ticktext=['0°','45°','90°','135°','180°','225°','270°','315°']
+        ),
+        radialaxis=dict(
+            title=radial_title,
+            angle=90
+        )
+    ),
+    barmode='overlay',
+    legend=dict(orientation='h')
+)
+
 st.plotly_chart(figa,use_container_width=True)
+
+st.caption(
+    '0° = deslocamento para +X; 90° = +Y; 180° = −X; 270° = −Y. '
+    'Os setores mostram a frequência angular dos vetores separadamente para Claro e Escuro.'
+)
 
 st.subheader('Vetores na origem e elipses direcionais')
 fige=go.Figure()
