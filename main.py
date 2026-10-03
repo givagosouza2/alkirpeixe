@@ -178,6 +178,73 @@ def summarize(seg,label):
     }
 
 
+
+def transition_metrics(df):
+    """
+    Calcula os tempos exatos de cruzamento de X=0 por interpolação linear.
+
+    Retorna:
+      - tempos de cruzamento
+      - intervalos entre cruzamentos consecutivos
+      - duração das permanências completas em Claro e Escuro
+        entre transições consecutivas
+    """
+    t = df["tempo"].to_numpy(float)
+    x = df["x"].to_numpy(float)
+
+    crossing_times = []
+    crossing_directions = []
+
+    for i in range(len(df) - 1):
+        t0, t1 = t[i], t[i + 1]
+        x0, x1 = x[i], x[i + 1]
+
+        if t1 <= t0:
+            continue
+
+        # Cruzamento real entre lados opostos
+        if (x0 < 0 and x1 > 0) or (x0 > 0 and x1 < 0):
+            f = -x0 / (x1 - x0)
+            tc = t0 + f * (t1 - t0)
+
+            crossing_times.append(float(tc))
+
+            if x0 < 0 and x1 > 0:
+                crossing_directions.append("Claro→Escuro")
+            else:
+                crossing_directions.append("Escuro→Claro")
+
+    crossing_times = np.asarray(crossing_times, dtype=float)
+
+    if len(crossing_times) >= 2:
+        intervals = np.diff(crossing_times)
+    else:
+        intervals = np.asarray([], dtype=float)
+
+    # Permanências completas entre transições sucessivas.
+    # O lado ocupado entre duas transições é determinado pela direção
+    # da primeira transição.
+    claro_intervals = []
+    escuro_intervals = []
+
+    if len(crossing_times) >= 2:
+        for i in range(len(crossing_times) - 1):
+            duration = crossing_times[i + 1] - crossing_times[i]
+
+            if crossing_directions[i] == "Claro→Escuro":
+                escuro_intervals.append(duration)
+            else:
+                claro_intervals.append(duration)
+
+    return {
+        "crossing_times": crossing_times,
+        "crossing_directions": crossing_directions,
+        "intervals": np.asarray(intervals, dtype=float),
+        "claro_intervals": np.asarray(claro_intervals, dtype=float),
+        "escuro_intervals": np.asarray(escuro_intervals, dtype=float),
+    }
+
+
 def count_crossings(df):
     x=df['x'].to_numpy(float); s=np.sign(x)
     for i in range(1,len(s)):
@@ -348,6 +415,38 @@ for name in ['Claro','Escuro']:
         figs.add_trace(go.Scatter(x=q['segundo'],y=q['tamanho_vetor'],mode='lines',name=name))
 figs.update_layout(xaxis_title='Tempo (s)',yaxis_title='Distância no segundo',height=420)
 st.plotly_chart(figs,use_container_width=True)
+
+
+st.subheader("Eventos de transição")
+
+if len(transitions["crossing_times"]):
+    transition_table = pd.DataFrame({
+        "ordem": np.arange(1, len(transitions["crossing_times"]) + 1),
+        "tempo_cruzamento": transitions["crossing_times"],
+        "direcao": transitions["crossing_directions"],
+    })
+
+    transition_table["intervalo_desde_transicao_anterior"] = np.nan
+    if len(transition_table) > 1:
+        transition_table.loc[
+            transition_table.index[1:],
+            "intervalo_desde_transicao_anterior"
+        ] = np.diff(transitions["crossing_times"])
+
+    st.dataframe(
+        transition_table.round(4),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.download_button(
+        "Baixar eventos de transição em CSV",
+        data=transition_table.to_csv(index=False).encode("utf-8"),
+        file_name="eventos_transicao_claro_escuro.csv",
+        mime="text/csv",
+    )
+else:
+    st.info("Nenhuma transição completa entre claro e escuro foi detectada no trecho selecionado.")
 
 st.subheader('Exportação')
 st.download_button('Baixar segmentos vetoriais em CSV',data=seg.to_csv(index=False).encode('utf-8'),file_name='segmentos_vetoriais_claro_escuro.csv',mime='text/csv')
