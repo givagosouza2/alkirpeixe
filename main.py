@@ -551,6 +551,208 @@ st.caption(
     'Os setores mostram a frequência angular dos vetores separadamente para Claro e Escuro.'
 )
 
+
+st.subheader("Tempo, distância e velocidade por orientação")
+
+orientation_bin = st.select_slider(
+    "Setores angulares para análise por orientação",
+    options=[15, 30, 45, 60, 90],
+    value=45,
+    format_func=lambda x: f"{x}°"
+)
+
+def orientation_summary(seg_df, bin_width):
+    if seg_df.empty:
+        return pd.DataFrame()
+
+    edges = np.arange(0, 360 + bin_width, bin_width)
+    labels = []
+
+    for a, b in zip(edges[:-1], edges[1:]):
+        labels.append(f"{int(a)}–{int(b)}°")
+
+    temp = seg_df.copy()
+    temp["setor"] = pd.cut(
+        temp["orientacao_graus"],
+        bins=edges,
+        labels=labels,
+        include_lowest=True,
+        right=False,
+    )
+
+    out = (
+        temp.groupby("setor", observed=False)
+        .agg(
+            tempo_total=("dt", "sum"),
+            distancia_total=("tamanho_vetor", "sum"),
+            n_vetores=("tamanho_vetor", "size"),
+            tamanho_medio_vetor=("tamanho_vetor", "mean"),
+        )
+        .reset_index()
+    )
+
+    out["velocidade_media"] = np.where(
+        out["tempo_total"] > 0,
+        out["distancia_total"] / out["tempo_total"],
+        np.nan,
+    )
+
+    out["percentual_tempo"] = (
+        100.0 * out["tempo_total"] / out["tempo_total"].sum()
+        if out["tempo_total"].sum() > 0
+        else np.nan
+    )
+
+    out["percentual_distancia"] = (
+        100.0 * out["distancia_total"] / out["distancia_total"].sum()
+        if out["distancia_total"].sum() > 0
+        else np.nan
+    )
+
+    return out
+
+
+ori_total = orientation_summary(seg, orientation_bin)
+ori_claro = orientation_summary(clear, orientation_bin)
+ori_escuro = orientation_summary(dark, orientation_bin)
+
+tab1, tab2, tab3 = st.tabs(["Campo total", "Claro", "Escuro"])
+
+for tab, title, ori in [
+    (tab1, "Campo total", ori_total),
+    (tab2, "Claro", ori_claro),
+    (tab3, "Escuro", ori_escuro),
+]:
+    with tab:
+        if ori.empty:
+            st.info("Sem dados suficientes.")
+            continue
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            fig_time_ori = go.Figure(
+                go.Barpolar(
+                    r=ori["tempo_total"],
+                    theta=[
+                        (i * orientation_bin) + orientation_bin / 2
+                        for i in range(len(ori))
+                    ],
+                    width=[orientation_bin * 0.9] * len(ori),
+                    hovertemplate=(
+                        "Setor=%{customdata}"
+                        "<br>Tempo=%{r:.3f} s<extra></extra>"
+                    ),
+                    customdata=ori["setor"].astype(str),
+                    name=title,
+                )
+            )
+
+            fig_time_ori.update_layout(
+                title=f"Tempo por orientação — {title}",
+                height=450,
+                polar=dict(
+                    angularaxis=dict(
+                        direction="counterclockwise",
+                        rotation=0,
+                        tickvals=[0,45,90,135,180,225,270,315],
+                        ticktext=["0°","45°","90°","135°","180°","225°","270°","315°"]
+                    ),
+                    radialaxis=dict(title="Tempo (s)")
+                ),
+                margin=dict(l=20, r=20, t=55, b=20)
+            )
+
+            st.plotly_chart(fig_time_ori, use_container_width=True)
+
+        with c2:
+            fig_dist_ori = go.Figure(
+                go.Barpolar(
+                    r=ori["distancia_total"],
+                    theta=[
+                        (i * orientation_bin) + orientation_bin / 2
+                        for i in range(len(ori))
+                    ],
+                    width=[orientation_bin * 0.9] * len(ori),
+                    hovertemplate=(
+                        "Setor=%{customdata}"
+                        "<br>Distância=%{r:.3f}<extra></extra>"
+                    ),
+                    customdata=ori["setor"].astype(str),
+                    name=title,
+                )
+            )
+
+            fig_dist_ori.update_layout(
+                title=f"Distância por orientação — {title}",
+                height=450,
+                polar=dict(
+                    angularaxis=dict(
+                        direction="counterclockwise",
+                        rotation=0,
+                        tickvals=[0,45,90,135,180,225,270,315],
+                        ticktext=["0°","45°","90°","135°","180°","225°","270°","315°"]
+                    ),
+                    radialaxis=dict(title="Distância")
+                ),
+                margin=dict(l=20, r=20, t=55, b=20)
+            )
+
+            st.plotly_chart(fig_dist_ori, use_container_width=True)
+
+        fig_vel_ori = go.Figure(
+            go.Bar(
+                x=ori["setor"].astype(str),
+                y=ori["velocidade_media"],
+                customdata=np.column_stack([
+                    ori["tempo_total"],
+                    ori["distancia_total"],
+                    ori["n_vetores"]
+                ]),
+                hovertemplate=(
+                    "Setor=%{x}"
+                    "<br>Velocidade média=%{y:.3f}"
+                    "<br>Tempo=%{customdata[0]:.3f} s"
+                    "<br>Distância=%{customdata[1]:.3f}"
+                    "<br>N vetores=%{customdata[2]}<extra></extra>"
+                )
+            )
+        )
+
+        fig_vel_ori.update_layout(
+            title=f"Velocidade média por orientação — {title}",
+            xaxis_title="Setor angular",
+            yaxis_title="Velocidade média",
+            height=420,
+            margin=dict(l=20, r=20, t=55, b=20),
+        )
+
+        st.plotly_chart(fig_vel_ori, use_container_width=True)
+
+        display_ori = ori.copy()
+        display_ori.columns = [
+            "Setor angular",
+            "Tempo total",
+            "Distância total",
+            "N vetores",
+            "Tamanho médio do vetor",
+            "Velocidade média",
+            "% do tempo",
+            "% da distância",
+        ]
+
+        st.dataframe(
+            display_ori.round(4),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+st.caption(
+    "Para cada setor angular, o tempo é a soma dos Δt dos vetores naquele setor; "
+    "a distância é a soma dos comprimentos dos vetores; e a velocidade média é "
+    "calculada como distância total do setor / tempo total do setor."
+)
+
 st.subheader('Vetores na origem e elipses direcionais')
 fige=go.Figure()
 for name,dsub in [('Claro',clear),('Escuro',dark)]:
