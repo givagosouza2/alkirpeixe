@@ -56,35 +56,87 @@ def extract_from_csv(uploaded_file):
 
 def extract_from_mat(uploaded_file):
     try:
-        mat = loadmat(io.BytesIO(uploaded_file.getvalue()), squeeze_me=True, struct_as_record=False)
+        mat = loadmat(
+            io.BytesIO(uploaded_file.getvalue()),
+            squeeze_me=True,
+            struct_as_record=False
+        )
     except NotImplementedError:
-        raise ValueError('Arquivo MATLAB v7.3/HDF5 não suportado por scipy.io.loadmat nesta versão.')
+        raise ValueError(
+            "Arquivo MATLAB v7.3/HDF5 não suportado por scipy.io.loadmat nesta versão."
+        )
     except Exception as exc:
-        raise ValueError(f'Não foi possível abrir o .mat: {exc}')
+        raise ValueError(f"Não foi possível abrir o .mat: {exc}")
 
-    if 'e' in mat:
-        e = mat['e']
+    regions = []
+    processed_region = None
+
+    if "e" in mat:
+        e = mat["e"]
+
         try:
-            return pd.DataFrame({
-                'tempo': np.asarray(e.t, dtype=float).ravel(),
-                'x': np.asarray(e.posicao.x, dtype=float).ravel(),
-                'y': np.asarray(e.posicao.y, dtype=float).ravel(),
+            df = pd.DataFrame({
+                "tempo": np.asarray(e.t, dtype=float).ravel(),
+                "x": np.asarray(e.posicao.x, dtype=float).ravel(),
+                "y": np.asarray(e.posicao.y, dtype=float).ravel(),
             })
+        except Exception as exc:
+            raise ValueError(
+                "Encontrei 'e', mas não consegui extrair e.t, e.posicao.x e e.posicao.y."
+            ) from exc
+
+        # Conversão dos limites de pixels para o mesmo sistema em cm de posicao.x/y.
+        # x_cm = x_pixel / px_per_cm_x
+        # y_cm = (altura_imagem - y_pixel) / px_per_cm_y
+        try:
+            px_per_cm_x = float(e.pxcm.x)
+            px_per_cm_y = float(e.pxcm.y)
+            image_height = float(e.figdimensions.l)
+
+            for i, reg in enumerate(np.atleast_1d(e.areaint), start=1):
+                rx_px = np.asarray(reg.x, dtype=float).ravel()
+                ry_px = np.asarray(reg.y, dtype=float).ravel()
+
+                rx_cm = rx_px / px_per_cm_x
+                ry_cm = (image_height - ry_px) / px_per_cm_y
+
+                if len(rx_cm) >= 3 and len(rx_cm) == len(ry_cm):
+                    regions.append({
+                        "name": f"Região {i}",
+                        "x": rx_cm,
+                        "y": ry_cm,
+                    })
+
+            try:
+                ap = e.areaproc
+                ax = np.asarray(ap.x, dtype=float).ravel() / px_per_cm_x
+                ay = (
+                    image_height - np.asarray(ap.y, dtype=float).ravel()
+                ) / px_per_cm_y
+                processed_region = {"x": ax, "y": ay}
+            except Exception:
+                processed_region = None
+
         except Exception:
-            pass
+            regions = []
+            processed_region = None
 
-    keys = {k.lower(): k for k in mat.keys() if not k.startswith('__')}
-    tkey = next((keys[k] for k in keys if k in ('t','tempo','time')), None)
-    xkey = next((keys[k] for k in keys if k in ('x','posicao_x','position_x')), None)
-    ykey = next((keys[k] for k in keys if k in ('y','posicao_y','position_y')), None)
+        return df, regions, processed_region
+
+    keys = {k.lower(): k for k in mat.keys() if not k.startswith("__")}
+    tkey = next((keys[k] for k in keys if k in ("t","tempo","time")), None)
+    xkey = next((keys[k] for k in keys if k in ("x","posicao_x","position_x")), None)
+    ykey = next((keys[k] for k in keys if k in ("y","posicao_y","position_y")), None)
+
     if tkey and xkey and ykey:
-        return pd.DataFrame({
-            'tempo': np.asarray(mat[tkey], dtype=float).ravel(),
-            'x': np.asarray(mat[xkey], dtype=float).ravel(),
-            'y': np.asarray(mat[ykey], dtype=float).ravel(),
+        df = pd.DataFrame({
+            "tempo": np.asarray(mat[tkey], dtype=float).ravel(),
+            "x": np.asarray(mat[xkey], dtype=float).ravel(),
+            "y": np.asarray(mat[ykey], dtype=float).ravel(),
         })
-    raise ValueError('Não encontrei e.t, e.posicao.x e e.posicao.y no .mat.')
+        return df, [], None
 
+    raise ValueError("Não encontrei e.t, e.posicao.x e e.posicao.y no .mat.")
 
 def prepare_data(df):
     out = df.copy()
@@ -100,6 +152,251 @@ def prepare_data(df):
     out['x_original'] = out['x']
     out['x'] = out['x'] - x0
     return out, x0
+
+
+
+def point_in_polygon(x, y, poly_x, poly_y):
+    """Ray casting para testar se um ponto está dentro de um polígono."""
+    px = np.asarray(poly_x, dtype=float)
+    py = np.asarray(poly_y, dtype=float)
+
+    inside = False
+    j = len(px) - 1
+
+    for i in range(len(px)):
+        xi, yi = px[i], py[i]
+        xj, yj = px[j], py[j]
+
+        intersects = (
+            ((yi > y) != (yj > y))
+            and (
+                x
+                < (xj - xi) * (y - yi) / ((yj - yi) + 1e-15) + xi
+            )
+        )
+
+        if intersects:
+            inside = not inside
+
+        j = i
+
+    return inside
+
+
+def classify_region(x, y, regions):
+    for reg in regions:
+        if point_in_polygon(x, y, reg["x"], reg["y"]):
+            return reg["name"]
+    return "Fora"
+
+
+def segment_intersection_fraction(p0, p1, q0, q1):
+    """Fração u do segmento p0->p1 que intersecta q0->q1."""
+    p0 = np.asarray(p0, dtype=float)
+    p1 = np.asarray(p1, dtype=float)
+    q0 = np.asarray(q0, dtype=float)
+    q1 = np.asarray(q1, dtype=float)
+
+    r = p1 - p0
+    s = q1 - q0
+
+    den = r[0] * s[1] - r[1] * s[0]
+
+    if abs(den) < 1e-12:
+        return None
+
+    qp = q0 - p0
+    u = (qp[0] * s[1] - qp[1] * s[0]) / den
+    v = (qp[0] * r[1] - qp[1] * r[0]) / den
+
+    if 0 <= u <= 1 and 0 <= v <= 1:
+        return float(u)
+
+    return None
+
+
+def crossing_fraction_between_regions(p0, p1, regions):
+    """Encontra a interseção do vetor com as bordas dos polígonos."""
+    candidates = []
+
+    for reg in regions:
+        poly = np.column_stack([
+            np.asarray(reg["x"], dtype=float),
+            np.asarray(reg["y"], dtype=float)
+        ])
+
+        if len(poly) < 3:
+            continue
+
+        if not np.allclose(poly[0], poly[-1]):
+            poly = np.vstack([poly, poly[0]])
+
+        for k in range(len(poly) - 1):
+            u = segment_intersection_fraction(
+                p0, p1, poly[k], poly[k + 1]
+            )
+            if u is not None and 1e-8 < u < 1 - 1e-8:
+                candidates.append(u)
+
+    if not candidates:
+        return None
+
+    # Quando duas regiões compartilham a mesma fronteira pode haver
+    # interseções duplicadas. A mediana é robusta nesse caso.
+    return float(np.median(candidates))
+
+
+def split_segments_regions(df, regions, region_to_side):
+    """
+    Classifica os vetores usando os polígonos reais do .mat.
+    Vetores que mudam de região são divididos na fronteira geométrica.
+    """
+    t = df["tempo"].to_numpy(float)
+    xo = df["x_original"].to_numpy(float)
+    xn = df["x"].to_numpy(float)
+    y = df["y"].to_numpy(float)
+
+    labels = [
+        classify_region(xo[i], y[i], regions)
+        for i in range(len(df))
+    ]
+
+    rows = []
+    events = []
+
+    for i in range(len(df) - 1):
+        t0, t1 = t[i], t[i + 1]
+        dt = t1 - t0
+        if dt <= 0:
+            continue
+
+        # Geometria original para localizar a fronteira
+        p0 = np.array([xo[i], y[i]], dtype=float)
+        p1 = np.array([xo[i + 1], y[i + 1]], dtype=float)
+
+        # Coordenada X normalizada é usada nas análises e figuras
+        x0, x1 = xn[i], xn[i + 1]
+        y0, y1 = y[i], y[i + 1]
+
+        lab0 = labels[i]
+        lab1 = labels[i + 1]
+
+        side0 = region_to_side.get(lab0, "Fora")
+        side1 = region_to_side.get(lab1, "Fora")
+
+        dx = x1 - x0
+        dy = y1 - y0
+        full_len = float(np.hypot(dx, dy))
+        full_speed = full_len / dt
+
+        if lab0 == lab1:
+            angle = float((np.degrees(np.arctan2(dy, dx)) + 360) % 360)
+
+            rows.append([
+                side0, t0, t1, dt,
+                x0, y0, x1, y1,
+                dx, dy, full_len, angle, False
+            ])
+            continue
+
+        u = crossing_fraction_between_regions(p0, p1, regions)
+
+        if u is None:
+            # Se por precisão numérica não for encontrada interseção,
+            # usa o ponto médio somente como fallback.
+            u = 0.5
+
+        tc = t0 + u * dt
+        xc = x0 + u * dx
+        yc = y0 + u * dy
+
+        # Primeira parte
+        dx1 = xc - x0
+        dy1 = yc - y0
+        L1 = float(np.hypot(dx1, dy1))
+        a1 = float((np.degrees(np.arctan2(dy1, dx1)) + 360) % 360)
+
+        rows.append([
+            side0, t0, tc, tc - t0,
+            x0, y0, xc, yc,
+            dx1, dy1, L1, a1, True
+        ])
+
+        # Segunda parte
+        dx2 = x1 - xc
+        dy2 = y1 - yc
+        L2 = float(np.hypot(dx2, dy2))
+        a2 = float((np.degrees(np.arctan2(dy2, dx2)) + 360) % 360)
+
+        rows.append([
+            side1, tc, t1, t1 - tc,
+            xc, yc, x1, y1,
+            dx2, dy2, L2, a2, True
+        ])
+
+        if side0 in ("Claro", "Escuro") and side1 in ("Claro", "Escuro") and side0 != side1:
+            events.append({
+                "tempo": float(tc),
+                "direcao": f"{side0}→{side1}",
+                "velocidade": float(full_speed),
+            })
+
+    cols = [
+        "lado","t_inicial","t_final","dt",
+        "x_inicial","y_inicial","x_final","y_final",
+        "dx","dy","tamanho_vetor","orientacao_graus","cruzamento"
+    ]
+
+    seg = pd.DataFrame(rows, columns=cols)
+
+    if not seg.empty:
+        seg["velocidade"] = np.where(
+            seg["dt"] > 0,
+            seg["tamanho_vetor"] / seg["dt"],
+            np.nan
+        )
+
+    return seg, pd.DataFrame(events), labels
+
+
+def transition_metrics_from_events(events):
+    if events.empty:
+        return {
+            "crossing_times": np.array([], dtype=float),
+            "crossing_directions": [],
+            "crossing_speeds": np.array([], dtype=float),
+            "intervals": np.array([], dtype=float),
+            "claro_intervals": np.array([], dtype=float),
+            "escuro_intervals": np.array([], dtype=float),
+        }
+
+    ev = events.sort_values("tempo").reset_index(drop=True)
+
+    times = ev["tempo"].to_numpy(float)
+    directions = ev["direcao"].tolist()
+    speeds = ev["velocidade"].to_numpy(float)
+
+    intervals = np.diff(times) if len(times) >= 2 else np.array([], dtype=float)
+
+    claro_intervals = []
+    escuro_intervals = []
+
+    for i in range(len(times) - 1):
+        duration = times[i + 1] - times[i]
+
+        if directions[i] == "Escuro→Claro":
+            claro_intervals.append(duration)
+        elif directions[i] == "Claro→Escuro":
+            escuro_intervals.append(duration)
+
+    return {
+        "crossing_times": times,
+        "crossing_directions": directions,
+        "crossing_speeds": speeds,
+        "intervals": np.asarray(intervals, dtype=float),
+        "claro_intervals": np.asarray(claro_intervals, dtype=float),
+        "escuro_intervals": np.asarray(escuro_intervals, dtype=float),
+    }
 
 
 def circular_mean_deg(angles_deg, weights=None):
@@ -269,33 +566,93 @@ uploaded=st.file_uploader('Selecione o arquivo', type=['csv','mat'])
 if uploaded is None:
     st.info('Carregue um CSV ou .mat para iniciar.'); st.stop()
 try:
+    regions = []
+    processed_region = None
+
     if uploaded.name.lower().endswith('.mat'):
-        raw=extract_from_mat(uploaded); ftype='MATLAB'
+        raw, regions, processed_region = extract_from_mat(uploaded)
+        ftype='MATLAB'
     else:
-        raw=extract_from_csv(uploaded); ftype='CSV'
+        raw=extract_from_csv(uploaded)
+        ftype='CSV'
+
     df,x0orig=prepare_data(raw)
+
 except Exception as exc:
     st.error(str(exc)); st.stop()
 
-st.success(f'{ftype} carregado: {len(df)} amostras. X inicial original={x0orig:.4f}; novo X inicial=0.')
+st.success(
+    f'{ftype} carregado: {len(df)} amostras. '
+    f'X inicial original={x0orig:.4f}; novo X inicial=0.'
+)
+
+if regions:
+    st.info(
+        f'Foram encontrados {len(regions)} polígonos em e.areaint. '
+        'Eles serão usados para classificar geometricamente as regiões.'
+    )
+else:
+    st.info(
+        'O arquivo não possui polígonos utilizáveis; será usada a separação X<0 / X>0.'
+    )
 
 tmax=float(df['tempo'].iloc[-1])
 selected=st.slider('Mostrar trajetória até',0.0,tmax,tmax,step=max(tmax/1500,0.01),format='%.2f s')
 cur=df[df['tempo']<=selected].copy()
 if len(cur)<2:
     st.warning('Aumente o tempo para incluir pelo menos duas coordenadas.'); st.stop()
-seg=split_segments(cur)
+if regions and len(regions) >= 2:
+    st.subheader('Identificação das regiões')
+
+    r1 = regions[0]['name']
+    r2 = regions[1]['name']
+
+    mapping_choice = st.radio(
+        'Qual região corresponde ao claro e ao escuro?',
+        [
+            f'{r1} = Claro | {r2} = Escuro',
+            f'{r1} = Escuro | {r2} = Claro',
+        ],
+        horizontal=True,
+    )
+
+    if mapping_choice.startswith(f'{r1} = Claro'):
+        region_to_side = {r1: 'Claro', r2: 'Escuro'}
+    else:
+        region_to_side = {r1: 'Escuro', r2: 'Claro'}
+
+    seg, region_events, point_region_labels = split_segments_regions(
+        cur, regions, region_to_side
+    )
+    transitions = transition_metrics_from_events(region_events)
+    cross = len(transitions['crossing_times'])
+
+else:
+    seg=split_segments(cur)
+    transitions = transition_metrics(cur)
+    cross=count_crossings(cur)
+    region_to_side = {}
+
 if seg.empty:
     st.warning('Não foi possível formar segmentos válidos.'); st.stop()
-clear=seg[seg['lado']=='Claro'].copy(); dark=seg[seg['lado']=='Escuro'].copy()
-sall=summarize(seg,'Campo total'); sc=summarize(clear,'Claro'); sd=summarize(dark,'Escuro')
-T=float(cur['tempo'].iloc[-1]-cur['tempo'].iloc[0]); D=float(seg['tamanho_vetor'].sum())
-mean_speed=D/T if T>0 else np.nan
-speed_sd=float(seg['velocidade'].std(ddof=1)) if len(seg)>1 else np.nan
-cross=count_crossings(cur)
 
-# Métricas das transições
-transitions = transition_metrics(cur)
+# Métricas específicas de claro e escuro
+clear=seg[seg['lado']=='Claro'].copy()
+dark=seg[seg['lado']=='Escuro'].copy()
+
+# Campo total usa todos os segmentos que pertencem a claro/escuro.
+valid_seg = seg[seg['lado'].isin(['Claro','Escuro'])].copy()
+if valid_seg.empty:
+    valid_seg = seg.copy()
+
+sall=summarize(valid_seg,'Campo total')
+sc=summarize(clear,'Claro')
+sd=summarize(dark,'Escuro')
+
+T=float(cur['tempo'].iloc[-1]-cur['tempo'].iloc[0])
+D=float(valid_seg['tamanho_vetor'].sum())
+mean_speed=D/T if T>0 else np.nan
+speed_sd=float(valid_seg['velocidade'].std(ddof=1)) if len(valid_seg)>1 else np.nan
 
 inter_transition = transitions["intervals"]
 mean_transition_interval = (
@@ -330,10 +687,64 @@ sd_dark_stay = (
 
 st.subheader('Trajetória')
 fig=go.Figure()
-fig.add_trace(go.Scatter(x=cur['x'],y=cur['y'],mode='lines',name='Trajetória',line=dict(width=2)))
-fig.add_trace(go.Scatter(x=cur.loc[cur['x']<=0,'x'],y=cur.loc[cur['x']<=0,'y'],mode='markers',name='Claro',marker=dict(size=4,opacity=.4)))
-fig.add_trace(go.Scatter(x=cur.loc[cur['x']>=0,'x'],y=cur.loc[cur['x']>=0,'y'],mode='markers',name='Escuro',marker=dict(size=4,opacity=.4)))
-fig.add_vline(x=0,line_width=2,line_dash='dash',annotation_text='X = 0')
+fig.add_trace(go.Scatter(
+    x=cur['x'],y=cur['y'],mode='lines',
+    name='Trajetória',line=dict(width=2)
+))
+
+if regions and len(regions) >= 2:
+    # Pontos classificados pelos polígonos reais
+    labels_now = [
+        classify_region(
+            float(cur['x_original'].iloc[i]),
+            float(cur['y'].iloc[i]),
+            regions
+        )
+        for i in range(len(cur))
+    ]
+
+    labels_now = np.asarray(labels_now, dtype=object)
+
+    for reg_name, side_name in region_to_side.items():
+        mask = labels_now == reg_name
+        fig.add_trace(go.Scatter(
+            x=cur.loc[mask,'x'],
+            y=cur.loc[mask,'y'],
+            mode='markers',
+            name=side_name,
+            marker=dict(size=4,opacity=.40)
+        ))
+
+    # Desenha limites convertidos para cm e deslocados pela origem X inicial
+    for reg in regions:
+        rx = np.asarray(reg['x'], dtype=float) - x0orig
+        ry = np.asarray(reg['y'], dtype=float)
+
+        fig.add_trace(go.Scatter(
+            x=np.r_[rx,rx[0]],
+            y=np.r_[ry,ry[0]],
+            mode='lines',
+            name=f"Limite {reg['name']}",
+            line=dict(width=3,dash='dash')
+        ))
+
+else:
+    fig.add_trace(go.Scatter(
+        x=cur.loc[cur['x']<=0,'x'],
+        y=cur.loc[cur['x']<=0,'y'],
+        mode='markers',name='Claro',
+        marker=dict(size=4,opacity=.4)
+    ))
+    fig.add_trace(go.Scatter(
+        x=cur.loc[cur['x']>=0,'x'],
+        y=cur.loc[cur['x']>=0,'y'],
+        mode='markers',name='Escuro',
+        marker=dict(size=4,opacity=.4)
+    ))
+    fig.add_vline(
+        x=0,line_width=2,line_dash='dash',
+        annotation_text='X = 0'
+    )
 fig.add_trace(go.Scatter(x=[cur['x'].iloc[0]],y=[cur['y'].iloc[0]],mode='markers',name='Início',marker=dict(size=11)))
 fig.add_trace(go.Scatter(x=[cur['x'].iloc[-1]],y=[cur['y'].iloc[-1]],mode='markers',name='Atual',marker=dict(size=11,symbol='diamond')))
 fig.update_layout(xaxis_title='X normalizado',yaxis_title='Y',height=600,legend=dict(orientation='h'))
