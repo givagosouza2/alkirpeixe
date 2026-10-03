@@ -194,6 +194,7 @@ def transition_metrics(df):
 
     crossing_times = []
     crossing_directions = []
+    crossing_speeds = []
 
     for i in range(len(df) - 1):
         t0, t1 = t[i], t[i + 1]
@@ -208,6 +209,12 @@ def transition_metrics(df):
             tc = t0 + f * (t1 - t0)
 
             crossing_times.append(float(tc))
+
+            # Velocidade do vetor original que contém o cruzamento
+            y0 = float(df["y"].iloc[i])
+            y1 = float(df["y"].iloc[i + 1])
+            distance = float(np.hypot(x1 - x0, y1 - y0))
+            crossing_speeds.append(distance / (t1 - t0))
 
             if x0 < 0 and x1 > 0:
                 crossing_directions.append("Claro→Escuro")
@@ -239,6 +246,7 @@ def transition_metrics(df):
     return {
         "crossing_times": crossing_times,
         "crossing_directions": crossing_directions,
+        "crossing_speeds": np.asarray(crossing_speeds, dtype=float),
         "intervals": np.asarray(intervals, dtype=float),
         "claro_intervals": np.asarray(claro_intervals, dtype=float),
         "escuro_intervals": np.asarray(escuro_intervals, dtype=float),
@@ -286,6 +294,40 @@ mean_speed=D/T if T>0 else np.nan
 speed_sd=float(seg['velocidade'].std(ddof=1)) if len(seg)>1 else np.nan
 cross=count_crossings(cur)
 
+# Métricas das transições
+transitions = transition_metrics(cur)
+
+inter_transition = transitions["intervals"]
+mean_transition_interval = (
+    float(np.mean(inter_transition)) if len(inter_transition) else np.nan
+)
+sd_transition_interval = (
+    float(np.std(inter_transition, ddof=1))
+    if len(inter_transition) > 1 else np.nan
+)
+median_transition_interval = (
+    float(np.median(inter_transition)) if len(inter_transition) else np.nan
+)
+
+clear_stays = transitions["claro_intervals"]
+dark_stays = transitions["escuro_intervals"]
+
+mean_clear_stay = (
+    float(np.mean(clear_stays)) if len(clear_stays) else np.nan
+)
+sd_clear_stay = (
+    float(np.std(clear_stays, ddof=1))
+    if len(clear_stays) > 1 else np.nan
+)
+
+mean_dark_stay = (
+    float(np.mean(dark_stays)) if len(dark_stays) else np.nan
+)
+sd_dark_stay = (
+    float(np.std(dark_stays, ddof=1))
+    if len(dark_stays) > 1 else np.nan
+)
+
 st.subheader('Trajetória')
 fig=go.Figure()
 fig.add_trace(go.Scatter(x=cur['x'],y=cur['y'],mode='lines',name='Trajetória',line=dict(width=2)))
@@ -306,18 +348,135 @@ cols[0].metric('Tempo claro',f"{fmt(sc['tempo_total'],2)} s"); cols[1].metric('T
 cols=st.columns(3)
 cols[0].metric('Distância claro',fmt(sc['distancia_total'])); cols[1].metric('Distância escuro',fmt(sd['distancia_total'])); cols[2].metric('Cruzamentos',str(cross))
 
+st.subheader('Dinâmica das transições')
+
+cols=st.columns(3)
+cols[0].metric(
+    'Intervalo médio entre transições',
+    f'{fmt(mean_transition_interval,2)} s'
+)
+cols[1].metric(
+    'DP do intervalo entre transições',
+    f'{fmt(sd_transition_interval,2)} s'
+)
+cols[2].metric(
+    'Mediana entre transições',
+    f'{fmt(median_transition_interval,2)} s'
+)
+
+cols=st.columns(4)
+cols[0].metric(
+    'Permanência média no claro',
+    f'{fmt(mean_clear_stay,2)} s'
+)
+cols[1].metric(
+    'DP permanência no claro',
+    f'{fmt(sd_clear_stay,2)} s'
+)
+cols[2].metric(
+    'Permanência média no escuro',
+    f'{fmt(mean_dark_stay,2)} s'
+)
+cols[3].metric(
+    'DP permanência no escuro',
+    f'{fmt(sd_dark_stay,2)} s'
+)
+
+st.caption(
+    'O intervalo entre transições é o tempo entre dois cruzamentos consecutivos de X = 0. '
+    'Os tempos de cruzamento são estimados por interpolação linear.'
+)
+
 comp=pd.DataFrame([sall,sc,sd])
 comp=comp[['regiao','tempo_total','distancia_total','velocidade_media','velocidade_dp','vetor_medio','vetor_dp','orientacao_media','semieixo_maior','semieixo_menor','indice_direcionalidade','orientacao_elipse','n_segmentos']]
 comp.columns=['Região','Tempo total','Distância total','Velocidade média','DP velocidade','Tamanho médio vetor','DP tamanho vetor','Orientação média (°)','Semieixo maior','Semieixo menor','Índice direcionalidade','Orientação elipse (°)','N segmentos']
 st.subheader('Comparação entre regiões')
 st.dataframe(comp.round(4),use_container_width=True,hide_index=True)
 
+st.subheader('Velocidade nas transições')
+
+transition_speed_df = pd.DataFrame({
+    "direcao": transitions["crossing_directions"],
+    "velocidade": transitions["crossing_speeds"],
+})
+
+if not transition_speed_df.empty:
+    ce = transition_speed_df.loc[
+        transition_speed_df["direcao"] == "Claro→Escuro",
+        "velocidade"
+    ]
+    ec = transition_speed_df.loc[
+        transition_speed_df["direcao"] == "Escuro→Claro",
+        "velocidade"
+    ]
+
+    cols = st.columns(4)
+    cols[0].metric(
+        "Vel. média Claro→Escuro",
+        fmt(float(ce.mean())) if len(ce) else "—"
+    )
+    cols[1].metric(
+        "DP Claro→Escuro",
+        fmt(float(ce.std(ddof=1))) if len(ce) > 1 else "—"
+    )
+    cols[2].metric(
+        "Vel. média Escuro→Claro",
+        fmt(float(ec.mean())) if len(ec) else "—"
+    )
+    cols[3].metric(
+        "DP Escuro→Claro",
+        fmt(float(ec.std(ddof=1))) if len(ec) > 1 else "—"
+    )
+
+st.caption(
+    "A velocidade de transição corresponde à velocidade do vetor entre as duas "
+    "amostras consecutivas que atravessam X = 0."
+)
+
 st.subheader('Velocidade ao longo do tempo')
 figv=go.Figure()
 for name,dsub in [('Claro',clear),('Escuro',dark)]:
     if not dsub.empty:
-        figv.add_trace(go.Scatter(x=dsub['t_final'],y=dsub['velocidade'],mode='markers',name=name,marker=dict(size=4,opacity=.55)))
-figv.update_layout(xaxis_title='Tempo (s)',yaxis_title='Velocidade',height=420)
+        figv.add_trace(go.Scatter(
+            x=dsub['t_final'],
+            y=dsub['velocidade'],
+            mode='markers',
+            name=name,
+            marker=dict(size=4,opacity=.45)
+        ))
+
+# Destacar as velocidades exatamente nos vetores que cruzam X = 0
+cross_t = transitions["crossing_times"]
+cross_dir = transitions["crossing_directions"]
+cross_v = transitions["crossing_speeds"]
+
+for direction, symbol in [
+    ("Claro→Escuro", "triangle-up"),
+    ("Escuro→Claro", "triangle-down"),
+]:
+    mask = np.array([d == direction for d in cross_dir], dtype=bool)
+    if np.any(mask):
+        figv.add_trace(
+            go.Scatter(
+                x=cross_t[mask],
+                y=cross_v[mask],
+                mode="markers",
+                name=direction,
+                marker=dict(size=13, symbol=symbol, line=dict(width=1.5)),
+                hovertemplate=(
+                    "Transição: " + direction +
+                    "<br>Tempo=%{x:.2f} s"
+                    "<br>Velocidade=%{y:.3f}<extra></extra>"
+                ),
+            )
+        )
+
+figv.update_layout(
+    xaxis_title='Tempo (s)',
+    yaxis_title='Velocidade',
+    height=460,
+    legend=dict(orientation='h')
+)
 st.plotly_chart(figv,use_container_width=True)
 
 st.subheader('Distribuição angular dos vetores — gráfico polar')
@@ -424,6 +583,7 @@ if len(transitions["crossing_times"]):
         "ordem": np.arange(1, len(transitions["crossing_times"]) + 1),
         "tempo_cruzamento": transitions["crossing_times"],
         "direcao": transitions["crossing_directions"],
+        "velocidade_transicao": transitions["crossing_speeds"],
     })
 
     transition_table["intervalo_desde_transicao_anterior"] = np.nan
