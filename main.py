@@ -1200,6 +1200,299 @@ st.caption(
     "calculada como distância total do setor / tempo total do setor."
 )
 
+
+st.subheader("Entropia espacial e direcional")
+
+def shannon_entropy_normalized(probabilities):
+    p = np.asarray(probabilities, dtype=float)
+    p = p[np.isfinite(p) & (p > 0)]
+
+    if len(p) <= 1:
+        return 0.0, 0.0
+
+    p = p / p.sum()
+
+    H = -np.sum(p * np.log(p))
+    Hmax = np.log(len(p))
+
+    Hnorm = H / Hmax if Hmax > 0 else 0.0
+
+    return float(H), float(Hnorm)
+
+
+def spatial_entropy_from_points(df_points, cell_size):
+    """
+    Calcula entropia de ocupação espacial usando uma grade regular.
+    O peso é baseado na frequência de amostras em cada célula.
+    """
+    if df_points.empty:
+        return np.nan, np.nan, pd.DataFrame()
+
+    x = df_points["x"].to_numpy(float)
+    y = df_points["y"].to_numpy(float)
+
+    if len(x) < 2:
+        return np.nan, np.nan, pd.DataFrame()
+
+    xmin, xmax = np.nanmin(x), np.nanmax(x)
+    ymin, ymax = np.nanmin(y), np.nanmax(y)
+
+    # Evita grade degenerada
+    if np.isclose(xmin, xmax):
+        xmax = xmin + cell_size
+    if np.isclose(ymin, ymax):
+        ymax = ymin + cell_size
+
+    x_edges = np.arange(xmin, xmax + cell_size, cell_size)
+    y_edges = np.arange(ymin, ymax + cell_size, cell_size)
+
+    if len(x_edges) < 2:
+        x_edges = np.array([xmin, xmin + cell_size])
+    if len(y_edges) < 2:
+        y_edges = np.array([ymin, ymin + cell_size])
+
+    hist, xe, ye = np.histogram2d(
+        x,
+        y,
+        bins=[x_edges, y_edges]
+    )
+
+    counts = hist.ravel()
+    occupied = counts[counts > 0]
+
+    if occupied.size == 0:
+        return np.nan, np.nan, pd.DataFrame()
+
+    probs = occupied / occupied.sum()
+    H, Hnorm = shannon_entropy_normalized(probs)
+
+    # Tabela para heatmap
+    centers_x = (xe[:-1] + xe[1:]) / 2
+    centers_y = (ye[:-1] + ye[1:]) / 2
+
+    heat = pd.DataFrame(
+        hist.T,
+        index=centers_y,
+        columns=centers_x,
+    )
+
+    return H, Hnorm, heat
+
+
+def directional_entropy(seg_df, bin_width):
+    """
+    Entropia da distribuição dos ângulos dos vetores.
+    """
+    if seg_df.empty:
+        return np.nan, np.nan
+
+    angles = seg_df["orientacao_graus"].to_numpy(float)
+
+    bins = np.arange(0, 360 + bin_width, bin_width)
+    hist, _ = np.histogram(angles, bins=bins)
+
+    if hist.sum() == 0:
+        return np.nan, np.nan
+
+    probs = hist[hist > 0] / hist.sum()
+
+    return shannon_entropy_normalized(probs)
+
+
+# Tamanho de célula espacial
+cell_size = st.select_slider(
+    "Tamanho da célula para entropia espacial",
+    options=[0.25, 0.5, 1.0, 2.0],
+    value=0.5,
+    format_func=lambda x: f"{x:.2f}"
+)
+
+# Largura angular independente da visualização polar anterior
+entropy_angle_bin = st.select_slider(
+    "Largura dos setores para entropia angular",
+    options=[10, 15, 20, 30, 45, 60],
+    value=30,
+    format_func=lambda x: f"{x}°"
+)
+
+# Pontos por região
+if regions and len(regions) >= 2:
+    labels_entropy = np.asarray([
+        classify_region(
+            float(cur["x_original"].iloc[i]),
+            float(cur["y"].iloc[i]),
+            regions
+        )
+        for i in range(len(cur))
+    ], dtype=object)
+
+    clear_region_names = [
+        k for k, v in region_to_side.items() if v == "Claro"
+    ]
+    dark_region_names = [
+        k for k, v in region_to_side.items() if v == "Escuro"
+    ]
+
+    clear_points = cur[
+        np.isin(labels_entropy, clear_region_names)
+    ].copy()
+
+    dark_points = cur[
+        np.isin(labels_entropy, dark_region_names)
+    ].copy()
+
+else:
+    clear_points = cur[cur["x"] <= 0].copy()
+    dark_points = cur[cur["x"] >= 0].copy()
+
+total_points = cur.copy()
+
+# Entropias espaciais
+Hsp_total, Hspn_total, heat_total = spatial_entropy_from_points(
+    total_points, cell_size
+)
+Hsp_clear, Hspn_clear, heat_clear = spatial_entropy_from_points(
+    clear_points, cell_size
+)
+Hsp_dark, Hspn_dark, heat_dark = spatial_entropy_from_points(
+    dark_points, cell_size
+)
+
+# Entropias direcionais
+Hang_total, Hangn_total = directional_entropy(
+    valid_seg, entropy_angle_bin
+)
+Hang_clear, Hangn_clear = directional_entropy(
+    clear, entropy_angle_bin
+)
+Hang_dark, Hangn_dark = directional_entropy(
+    dark, entropy_angle_bin
+)
+
+st.markdown("#### Entropia espacial normalizada")
+
+cols = st.columns(3)
+cols[0].metric(
+    "Campo total",
+    fmt(Hspn_total, 3)
+)
+cols[1].metric(
+    "Claro",
+    fmt(Hspn_clear, 3)
+)
+cols[2].metric(
+    "Escuro",
+    fmt(Hspn_dark, 3)
+)
+
+st.caption(
+    "Entropia espacial próxima de 0 indica ocupação concentrada em poucas células; "
+    "valores próximos de 1 indicam ocupação mais distribuída entre as células visitadas."
+)
+
+st.markdown("#### Entropia angular normalizada")
+
+cols = st.columns(3)
+cols[0].metric(
+    "Campo total",
+    fmt(Hangn_total, 3)
+)
+cols[1].metric(
+    "Claro",
+    fmt(Hangn_clear, 3)
+)
+cols[2].metric(
+    "Escuro",
+    fmt(Hangn_dark, 3)
+)
+
+st.caption(
+    "Entropia angular próxima de 0 indica movimentos concentrados em poucas direções; "
+    "valores próximos de 1 indicam maior diversidade de orientações."
+)
+
+# Mapa de ocupação espacial
+st.markdown("#### Mapas de ocupação")
+
+tabs_entropy = st.tabs(["Campo total", "Claro", "Escuro"])
+
+for tab, title, heat in [
+    (tabs_entropy[0], "Campo total", heat_total),
+    (tabs_entropy[1], "Claro", heat_clear),
+    (tabs_entropy[2], "Escuro", heat_dark),
+]:
+    with tab:
+        if heat.empty:
+            st.info("Sem dados suficientes para o mapa de ocupação.")
+        else:
+            fig_heat = go.Figure(
+                data=go.Heatmap(
+                    z=heat.to_numpy(),
+                    x=heat.columns.to_numpy(float),
+                    y=heat.index.to_numpy(float),
+                    colorbar=dict(title="N amostras"),
+                    hovertemplate=(
+                        "X=%{x:.2f}<br>"
+                        "Y=%{y:.2f}<br>"
+                        "Amostras=%{z}<extra></extra>"
+                    ),
+                )
+            )
+
+            fig_heat.update_layout(
+                title=f"Ocupação espacial — {title}",
+                xaxis_title="X",
+                yaxis_title="Y",
+                height=500,
+                margin=dict(l=20, r=20, t=55, b=20),
+            )
+
+            fig_heat.update_yaxes(
+                scaleanchor="x",
+                scaleratio=1,
+            )
+
+            st.plotly_chart(
+                fig_heat,
+                use_container_width=True
+            )
+
+# Tabela resumo
+entropy_summary = pd.DataFrame({
+    "Região": ["Campo total", "Claro", "Escuro"],
+    "Entropia espacial": [
+        Hsp_total, Hsp_clear, Hsp_dark
+    ],
+    "Entropia espacial normalizada": [
+        Hspn_total, Hspn_clear, Hspn_dark
+    ],
+    "Entropia angular": [
+        Hang_total, Hang_clear, Hang_dark
+    ],
+    "Entropia angular normalizada": [
+        Hangn_total, Hangn_clear, Hangn_dark
+    ],
+})
+
+st.dataframe(
+    entropy_summary.round(4),
+    use_container_width=True,
+    hide_index=True,
+)
+
+st.download_button(
+    "Baixar resumo de entropia em CSV",
+    data=entropy_summary.to_csv(index=False).encode("utf-8"),
+    file_name="resumo_entropia.csv",
+    mime="text/csv",
+)
+
+st.caption(
+    "As entropias normalizadas variam aproximadamente entre 0 e 1. "
+    "A comparação entre animais deve ser feita usando o mesmo tamanho de célula "
+    "e a mesma largura dos setores angulares."
+)
+
 st.subheader('Vetores na origem e elipses direcionais')
 fige=go.Figure()
 for name,dsub in [('Claro',clear),('Escuro',dark)]:
