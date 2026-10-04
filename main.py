@@ -70,6 +70,7 @@ def extract_from_mat(uploaded_file):
 
     regions = []
     processed_region = None
+    stopped_events = pd.DataFrame(columns=['ti', 'tf'])
 
     if "e" in mat:
         e = mat["e"]
@@ -121,7 +122,25 @@ def extract_from_mat(uploaded_file):
             regions = []
             processed_region = None
 
-        return df, regions, processed_region
+        # Episódios de imobilidade/parado já detectados no arquivo MATLAB
+        try:
+            ti = np.atleast_1d(np.asarray(e.parado.ti, dtype=float)).ravel()
+            tf = np.atleast_1d(np.asarray(e.parado.tf, dtype=float)).ravel()
+
+            n = min(len(ti), len(tf))
+            stopped_events = pd.DataFrame({
+                "ti": ti[:n],
+                "tf": tf[:n],
+            })
+            stopped_events = stopped_events[
+                np.isfinite(stopped_events["ti"]) &
+                np.isfinite(stopped_events["tf"]) &
+                (stopped_events["tf"] >= stopped_events["ti"])
+            ].reset_index(drop=True)
+        except Exception:
+            stopped_events = pd.DataFrame(columns=["ti", "tf"])
+
+        return df, regions, processed_region, stopped_events
 
     keys = {k.lower(): k for k in mat.keys() if not k.startswith("__")}
     tkey = next((keys[k] for k in keys if k in ("t","tempo","time")), None)
@@ -134,7 +153,7 @@ def extract_from_mat(uploaded_file):
             "x": np.asarray(mat[xkey], dtype=float).ravel(),
             "y": np.asarray(mat[ykey], dtype=float).ravel(),
         })
-        return df, [], None
+        return df, [], None, pd.DataFrame(columns=['ti', 'tf'])
 
     raise ValueError("Não encontrei e.t, e.posicao.x e e.posicao.y no .mat.")
 
@@ -399,6 +418,113 @@ def transition_metrics_from_events(events):
     }
 
 
+
+def classify_stopped_events(
+    stopped_events,
+    full_df,
+    selected_time,
+    regions=None,
+    region_to_side=None,
+):
+    """
+    Classifica episódios de e.parado como Claro/Escuro pela posição
+    interpolada no ponto médio temporal do episódio.
+
+    Os tempos de e.parado são convertidos para a mesma origem temporal
+    usada no app. Episódios iniciados até selected_time são incluídos;
+    se ainda estiverem em andamento, tf é truncado no tempo selecionado.
+    """
+    if stopped_events is None or stopped_events.empty:
+        return pd.DataFrame(
+            columns=[
+                "ti", "tf", "duracao", "tempo_medio",
+                "x", "y", "lado"
+            ]
+        )
+
+    # origem temporal original antes de prepare_data zerar o tempo
+    t0_original = float(full_df["tempo_original"].iloc[0])
+
+    ev = stopped_events.copy()
+    ev["ti_rel"] = ev["ti"] - t0_original
+    ev["tf_rel"] = ev["tf"] - t0_original
+
+    # Se e.parado já estiver em tempo relativo, a subtração acima pode
+    # deslocar incorretamente. Detecta isso pela faixa de tempo.
+    total_duration = float(full_df["tempo"].iloc[-1])
+    if (
+        len(ev)
+        and (
+            ev["tf_rel"].max() < -1e-6
+            or ev["ti_rel"].min() > total_duration + 1
+        )
+    ):
+        ev["ti_rel"] = ev["ti"]
+        ev["tf_rel"] = ev["tf"]
+
+    ev = ev[
+        (ev["ti_rel"] <= selected_time) &
+        (ev["tf_rel"] >= 0)
+    ].copy()
+
+    if ev.empty:
+        return pd.DataFrame(
+            columns=[
+                "ti", "tf", "duracao", "tempo_medio",
+                "x", "y", "lado"
+            ]
+        )
+
+    ev["ti_clip"] = ev["ti_rel"].clip(lower=0)
+    ev["tf_clip"] = ev["tf_rel"].clip(upper=selected_time)
+    ev = ev[ev["tf_clip"] >= ev["ti_clip"]].copy()
+
+    t_mid = (
+        ev["ti_clip"].to_numpy(float) +
+        ev["tf_clip"].to_numpy(float)
+    ) / 2.0
+
+    t_series = full_df["tempo"].to_numpy(float)
+    x_orig_series = full_df["x_original"].to_numpy(float)
+    x_norm_series = full_df["x"].to_numpy(float)
+    y_series = full_df["y"].to_numpy(float)
+
+    x_orig_mid = np.interp(t_mid, t_series, x_orig_series)
+    x_norm_mid = np.interp(t_mid, t_series, x_norm_series)
+    y_mid = np.interp(t_mid, t_series, y_series)
+
+    sides = []
+
+    for xo, xn, yy in zip(x_orig_mid, x_norm_mid, y_mid):
+        if regions and region_to_side:
+            reg = classify_region(float(xo), float(yy), regions)
+            side = region_to_side.get(reg, "Fora")
+        else:
+            if xn < 0:
+                side = "Claro"
+            elif xn > 0:
+                side = "Escuro"
+            else:
+                side = "Fronteira"
+
+        sides.append(side)
+
+    out = pd.DataFrame({
+        "ti": ev["ti_clip"].to_numpy(float),
+        "tf": ev["tf_clip"].to_numpy(float),
+        "duracao": (
+            ev["tf_clip"].to_numpy(float) -
+            ev["ti_clip"].to_numpy(float)
+        ),
+        "tempo_medio": t_mid,
+        "x": x_norm_mid,
+        "y": y_mid,
+        "lado": sides,
+    })
+
+    return out
+
+
 def circular_mean_deg(angles_deg, weights=None):
     a = np.deg2rad(np.asarray(angles_deg, float))
     if len(a) == 0: return np.nan
@@ -568,9 +694,10 @@ if uploaded is None:
 try:
     regions = []
     processed_region = None
+    stopped_events = pd.DataFrame(columns=['ti', 'tf'])
 
     if uploaded.name.lower().endswith('.mat'):
-        raw, regions, processed_region = extract_from_mat(uploaded)
+        raw, regions, processed_region, stopped_events = extract_from_mat(uploaded)
         ftype='MATLAB'
     else:
         raw=extract_from_csv(uploaded)
@@ -750,6 +877,100 @@ fig.add_trace(go.Scatter(x=[cur['x'].iloc[-1]],y=[cur['y'].iloc[-1]],mode='marke
 fig.update_layout(xaxis_title='X normalizado',yaxis_title='Y',height=600,legend=dict(orientation='h'))
 fig.update_yaxes(scaleanchor='x',scaleratio=1)
 st.plotly_chart(fig,use_container_width=True)
+
+
+# ------------------------------------------------------------
+# Episódios de imobilidade / parado
+# ------------------------------------------------------------
+classified_stops = classify_stopped_events(
+    stopped_events=stopped_events,
+    full_df=df,
+    selected_time=selected,
+    regions=regions if regions else None,
+    region_to_side=region_to_side if regions else None,
+)
+
+clear_stops = classified_stops[
+    classified_stops["lado"] == "Claro"
+].copy()
+
+dark_stops = classified_stops[
+    classified_stops["lado"] == "Escuro"
+].copy()
+
+n_clear_stops = len(clear_stops)
+n_dark_stops = len(dark_stops)
+
+time_clear_stopped = (
+    float(clear_stops["duracao"].sum())
+    if n_clear_stops else 0.0
+)
+time_dark_stopped = (
+    float(dark_stops["duracao"].sum())
+    if n_dark_stops else 0.0
+)
+
+mean_clear_stop = (
+    float(clear_stops["duracao"].mean())
+    if n_clear_stops else np.nan
+)
+mean_dark_stop = (
+    float(dark_stops["duracao"].mean())
+    if n_dark_stops else np.nan
+)
+
+st.subheader("Episódios em que o animal ficou parado")
+
+cols = st.columns(4)
+cols[0].metric("Nº episódios parado — Claro", str(n_clear_stops))
+cols[1].metric("Nº episódios parado — Escuro", str(n_dark_stops))
+cols[2].metric(
+    "Tempo total parado — Claro",
+    f"{fmt(time_clear_stopped, 2)} s"
+)
+cols[3].metric(
+    "Tempo total parado — Escuro",
+    f"{fmt(time_dark_stopped, 2)} s"
+)
+
+cols = st.columns(2)
+cols[0].metric(
+    "Duração média episódio — Claro",
+    f"{fmt(mean_clear_stop, 2)} s"
+)
+cols[1].metric(
+    "Duração média episódio — Escuro",
+    f"{fmt(mean_dark_stop, 2)} s"
+)
+
+if stopped_events.empty:
+    st.caption(
+        "Este arquivo não contém episódios em e.parado; "
+        "por isso as métricas de imobilidade não estão disponíveis."
+    )
+else:
+    st.caption(
+        "Os episódios são obtidos diretamente de e.parado.ti/e.parado.tf. "
+        "Cada episódio é classificado pela posição interpolada do animal "
+        "no ponto médio temporal do intervalo."
+    )
+
+with st.expander("Ver episódios de imobilidade"):
+    if classified_stops.empty:
+        st.info("Nenhum episódio disponível no trecho temporal selecionado.")
+    else:
+        st.dataframe(
+            classified_stops.round(4),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.download_button(
+            "Baixar episódios de imobilidade em CSV",
+            data=classified_stops.to_csv(index=False).encode("utf-8"),
+            file_name="episodios_parado_claro_escuro.csv",
+            mime="text/csv",
+        )
 
 st.subheader('Métricas gerais')
 cols=st.columns(4)
